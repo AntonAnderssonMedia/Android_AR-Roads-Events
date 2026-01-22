@@ -1276,7 +1276,7 @@
         // ============================================================================
         // LOAD ROAD DATA FROM GEOJSON FILE
         // ============================================================================
-        // This function loads road network data from a GeoJSON file (roads_nkpg_wgs84.geojson).
+        // This function loads road network data from a GeoJSON file (roads_nkpg_WGS84.geojson).
         // The GeoJSON contains MultiLineString features, where each feature represents a road.
         //
         // The function:
@@ -1298,7 +1298,7 @@
             // FETCH AND PARSE GEOJSON FILE
             // ============================================================================
             
-            const response = await fetch("roads_nkpg_wgs84.geojson");
+            const response = await fetch("roads_nkpg_WGS84.geojson");
             // Fetch the GeoJSON file from the server (relative to index.html location)
             
             const geojson = await response.json();

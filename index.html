@@ -543,7 +543,7 @@
         // Called from onSelect when placement mode is ON and user taps a surface.
         // 
         // If the plane doesn't exist yet, it creates it and loads events/roads.
-        // If the plane already exists, it just moves it to the new location.
+        // If the plane already exists, it just moves it to the new location. For efficiency :) 
 
         function placeOrMovePlaneFromPose(pose) {
           // Remember if this is the first time placing the plane (vs. moving an existing one)
@@ -1079,6 +1079,66 @@
         }
 
         // ============================================================================
+        // CALCULATE NORMALIZED HEIGHT FROM TIMESTAMP
+        // ============================================================================
+        // This function calculates the height (Z position) for an event marker based on
+        // its timestamp relative to the first and last events of the same day.
+        // First event of the day = 0.01m (1cm), last event = 2m (20cm).
+        // All events in between are linearly interpolated.
+
+        function calculateHeightFromTimestamp(eventMarkers, targetMarker) {
+          // If there's only one event, place it at the minimum height
+          if (eventMarkers.length <= 1) {
+            return 0.01;
+          }
+          
+          // Find the first and last timestamps for events of this date
+          let minTime = Infinity;
+          let maxTime = -Infinity;
+          
+          for (const marker of eventMarkers) {
+            const dateTimeEvent = marker.userData.dateTimeEvent;
+            if (!dateTimeEvent) continue;
+            
+            // Parse timestamp: "YYYY/MM/DD HH:MM:SS.sss"
+            // Convert to Date object for comparison
+            const dateStr = dateTimeEvent.replace(/\//g, '-'); // Replace / with - for Date parsing
+            const eventDate = new Date(dateStr);
+            
+            if (isNaN(eventDate.getTime())) continue; // Skip invalid dates
+            
+            const timestamp = eventDate.getTime(); // Get milliseconds since epoch
+            
+            if (timestamp < minTime) minTime = timestamp;
+            if (timestamp > maxTime) maxTime = timestamp;
+          }
+          
+          // If all events have the same timestamp, place at minimum height
+          if (minTime === maxTime) {
+            return 0.01;
+          }
+          
+          // Get the target marker's timestamp
+          const targetDateTime = targetMarker.userData.dateTimeEvent;
+          if (!targetDateTime) return 0.01; // Default to minimum if no timestamp
+          
+          const targetDateStr = targetDateTime.replace(/\//g, '-');
+          const targetDate = new Date(targetDateStr);
+          
+          if (isNaN(targetDate.getTime())) return 0.01; // Default to minimum if invalid
+          
+          const targetTime = targetDate.getTime();
+          
+          // Normalize to 0-1 range (0 = first event, 1 = last event)
+          const normalized = (targetTime - minTime) / (maxTime - minTime);
+          
+          // Map to height range: 0.01m (first) to 0.2m (last)
+          const height = 0.01 + (normalized * (0.2 - 0.01));
+          
+          return height;
+        }
+
+        // ============================================================================
         // ADD EVENT MARKERS TO THE PLANE SURFACE (Y = UP FROM PLANE)
         // ============================================================================
         // This function positions event marker spheres on the map plane surface and adds
@@ -1155,16 +1215,13 @@
             // Position the marker using its pre-calculated coordinates
             // Z is the normal (upwards), so we use Z for height
               
-              // For future timestamp-based height normalization:
-              // const dateTimeEvent = marker.userData.dateTimeEvent; // Format: "YYYY/MM/DD HH:MM:SS.sss"
-              // const eventDate = new Date(dateTimeEvent.replace(/\//g, '-')); // Convert to Date object
-              // const normalizedHeight = calculateHeightFromTimestamp(eventDate); // Normalize to 0-1 range
-              // const height = 0.5 + (normalizedHeight * 1.5); // Scale to 0.5m - 2.0m range (or your desired range)
+              // Calculate height based on timestamp normalization within the day
+              const height = calculateHeightFromTimestamp(eventMarkers, marker);
               
               marker.position.set(
               marker.userData.localX,  // X = longitude direction (west-east)
               marker.userData.localZ,  // Y = latitude direction (south-north)
-              0.3                       // Z = 0.3 meter above plane surface (temporary fixed height)
+              height                   // Z = normalized height based on timestamp (0.01m to 0.2m)
             );
             // localX and localZ were calculated in loadEvents() using projectToMapSurface()
             

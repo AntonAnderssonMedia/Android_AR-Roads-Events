@@ -1,0 +1,1715 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AR Marker Detection + Map plane</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        width: 100%;
+        height: 100%;
+        background: #000;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      #enter-ar {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        padding: 12px 20px;
+        border-radius: 999px;
+        border: none;
+        background: #2563eb;
+        color: #fff;
+        font-size: 16px;
+        font-weight: 600;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+        cursor: pointer;
+        z-index: 10;
+      }
+
+      #enter-ar[disabled] {
+        background: #4b5563;
+        cursor: not-allowed;
+      }
+
+      #instructions {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        right: 16px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(0, 0, 0, 0.5);
+        color: #f9fafb;
+        font-size: 12px;
+        backdrop-filter: blur(8px);
+        z-index: 10;
+        text-align: center;
+        line-height: 1.3;
+      }
+
+      #unsupported {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #020617;
+        color: #e5e7eb;
+        padding: 24px;
+        text-align: center;
+        font-size: 15px;
+      }
+
+      #placement-toggle {
+        position: fixed;
+        bottom: 24px;
+        right: 16px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        border: none;
+        background: rgba(15, 23, 42, 0.8);
+        color: #e5e7eb;
+        font-size: 13px;
+        font-weight: 500;
+        backdrop-filter: blur(10px);
+        cursor: pointer;
+        z-index: 11;
+      }
+
+      #center-reticle {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        width: 26px;
+        height: 26px;
+        margin-left: -13px;
+        margin-top: -13px;
+        border: 2px solid rgba(255, 255, 255, 0.5); /* alpha value sets transparency */
+        border-radius: 50%;
+        box-shadow: 0 0 8px rgba(0, 0, 0, 0.4);
+        pointer-events: none;
+        z-index: 12;
+        display: none;
+      }
+      #center-reticle::before,
+      #center-reticle::after {
+        content: "";
+        position: absolute;
+        background: rgba(255, 255, 255, 0.5); /* alpha value sets transparency */
+      }
+      #center-reticle::before {
+        left: 50%;
+        top: 2px;
+        width: 2px;
+        height: 22px;
+        transform: translateX(-50%);
+      }
+      #center-reticle::after {
+        top: 50%;
+        left: 2px;
+        width: 22px;
+        height: 2px;
+        transform: translateY(-50%);
+      }
+
+    </style>
+  </head>
+  <body>
+
+    <!-- Current version: JAN 2026 -->
+     
+    <div id="instructions">Tap "Enter AR" to start, then move your phone to find a surface.</div>
+    <!-- Event date filter -->
+    <div id="event-date-filter" style="position: fixed; top: 96px; left: 16px; z-index: 11; background: rgba(15,23,42,0.9); color: #e5e7eb; padding: 6px 10px; border-radius: 999px; font-size: 11px; display: flex; align-items: center; gap: 6px; pointer-events: auto;">
+      <button id="event-date-prev" style="background: rgba(31,41,55,1); color: #e5e7eb; border: none; border-radius: 999px; padding: 2px 6px; font-size: 11px; cursor: pointer;">◀</button>
+      <span id="event-date-label">Loading...</span>
+      <button id="event-date-next" style="background: rgba(31,41,55,1); color: #e5e7eb; border: none; border-radius: 999px; padding: 2px 6px; font-size: 11px; cursor: pointer;">▶</button>
+      </div>
+    <button id="placement-toggle" style="display:none;">Placement: ON</button>
+    <button id="enter-ar">Enter AR</button>
+    
+    <div id="center-reticle"></div>
+
+    <div id="unsupported" style="display:none;">
+      Your browser/ device does not support WebXR AR (`immersive-ar`).<br />
+      Try using Chrome on an Android device with ARCore support.
+    </div>
+
+
+    <!-- Main AR logic -->
+    <script type="module">
+      import * as THREE from "https://unpkg.com/three@0.165.0/build/three.module.js";
+
+      // Basic feature detection for WebXR AR
+      async function supportsAR() {
+        if (!navigator.xr || !navigator.xr.isSessionSupported) return false;
+        try {
+          return await navigator.xr.isSessionSupported("immersive-ar");
+        } catch {
+          return false;
+        }
+      }
+
+      (async function init() {
+        const enterARButton = document.getElementById("enter-ar");
+        const unsupportedEl = document.getElementById("unsupported");
+        const placementToggleButton = document.getElementById("placement-toggle");
+        const instructionsEl = document.getElementById("instructions");
+        const centerReticleEl = document.getElementById("center-reticle");
+
+        if (!(await supportsAR())) {
+          enterARButton.style.display = "none";
+          unsupportedEl.style.display = "flex";
+          return;
+        }
+
+        let renderer, scene, camera;
+        let xrSession = null;
+        let referenceSpace = null;
+        let hitTestSource = null;
+        let hitTestSourceRequested = false;
+        let reticle = null;
+        let placedPlane = null;
+        let planeAnchor = null; // XRAnchor if available
+        let planeOrientationOffset = null; // Quaternion to rotate geometry to lie on surface
+        let placementMode = true; // When false, reticle is hidden and taps do not move plane
+        let mapTexture = null; // Shared texture for reticle + placed plane
+        let blockNextSelect = false; // Used to ignore XR select when UI buttons are tapped
+        
+        const eventMarkers = []; // Event markers currently instantiated as meshes
+        const allEvents = [];    // Raw event data (for all dates)
+        let eventsLoaded = false;
+        let activeEventDate = null; // Currently selected date (YYYY/MM/DD)
+        let availableEventDates = []; // All unique dates present in data
+        const roadMeshes = []; // Road line meshes from GeoJSON
+        let roadsLoaded = false;
+        
+        // ============================================================================
+        // MAP COORDINATE SYSTEM CONFIGURATION
+        // ============================================================================
+        // The map image (nrkpg-map.png) covers a specific geographic area.
+        // These corner coordinates define the bounds of that area in WGS84 (latitude/longitude).
+        // We use these to project any lat/lon coordinate onto the 40cm x 40cm plane surface.
+        
+        const mapCorners = {
+          topLeft: [58.635427, 16.119594],   // Northwest corner [lat, lon] - top-left of map image
+          topRight: [58.633813,	16.291792],   // Northeast corner [lat, lon] - top-right of map image
+          bottomRight: [58.544023,	16.288487],  // Southeast corner [lat, lon] - bottom-right of map image
+          bottomLeft: [58.545631,	16.116729]  // Southwest corner [lat, lon] - bottom-left of map image
+        };
+        // These coordinates are used by projectToMapSurface() to convert any lat/lon into X/Z coordinates
+        // on the plane (where X = west-to-east, Z = south-to-north, both in meters from center).
+
+        const overlayRotationY = Math.PI / 2;
+
+        // ============================================================================
+        // THREE.JS INITIALIZATION
+        // ============================================================================
+
+        function setupThree() {
+          // Create the WebGL renderer that draws 3D graphics to the screen
+          renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+          // antialias: true = smooth edges (better quality, slightly slower)
+          // alpha: true = transparent background (so AR camera feed shows through)
+          
+          renderer.setPixelRatio(window.devicePixelRatio);
+          renderer.setSize(window.innerWidth, window.innerHeight);
+          
+          renderer.xr.enabled = true;
+          // Enable WebXR support. This allows the renderer to work with AR sessions.
+          
+          renderer.domElement.style.width = "100%";
+          renderer.domElement.style.height = "100%";
+          // Make the canvas fill the viewport (CSS sizing)
+          
+          document.body.appendChild(renderer.domElement);
+          // Add the canvas element to the page so we can see the 3D graphics
+
+          scene = new THREE.Scene();
+          // Create the root 3D scene. All objects (meshes, lights, etc.) are added to this.
+
+          // Create a perspective camera (normal 3D camera with depth perception)
+          // This is used as a fallback when NOT in AR mode. In AR, XR overrides this.
+          camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+          // 70 = field of view in degrees (how wide the view is)
+          // window.innerWidth / window.innerHeight = aspect ratio (matches screen shape)
+          // 0.01 = near clipping plane (objects closer than 1cm are not rendered)
+          // 20 = far clipping plane (objects farther than 20m are not rendered)
+
+          // ============================================================================
+          // LIGHTING SETUP
+          // ============================================================================
+
+          const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
+          // HemisphereLight: Simulates sky lighting (bright from above, darker from below)
+          // 0xffffff = sky color (white/light)
+          // 0x444444 = ground color (dark gray)
+          // 1.0 = intensity (how bright)
+          hemiLight.position.set(0, 1, 0);
+          // Position at (0, 1, 0) - above the scene, pointing down
+          scene.add(hemiLight);
+
+          const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
+          // DirectionalLight: Simulates sunlight (parallel rays from one direction)
+          // 0xffffff = color (white)
+          // 0.7 = intensity
+          dirLight.position.set(0.5, 1, 0.5);
+          // Position determines direction. Light shines FROM this position toward origin (0,0,0)
+          // (0.5, 1, 0.5) = slightly offset, shining down and forward
+          scene.add(dirLight);
+
+          // ============================================================================
+          // MAP TEXTURE LOADING
+          // ============================================================================
+          
+          const textureLoader = new THREE.TextureLoader();
+          // TextureLoader: Utility class that loads image files and converts them to WebGL textures
+          
+          textureLoader.load(
+            "nrkpg-map.png",  // Path to the map image file
+            (tex) => {
+              // SUCCESS CALLBACK: Called when the image loads successfully
+              // 'tex' is the loaded THREE.Texture object
+              
+              tex.encoding = THREE.sRGBEncoding;
+              // sRGB encoding: Ensures colors look correct on screen (handles gamma correction)
+              // Without this, images can look too dark or washed out
+              
+              tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+              // Anisotropic filtering: Improves texture quality when viewed at an angle
+              // getMaxAnisotropy() returns the maximum supported level (usually 16)
+              // Higher values = better quality but slightly more GPU cost
+              
+              mapTexture = tex;
+              // Store the texture in our global variable so other functions can use it
+
+              // If the reticle or plane were already created before the texture loaded,
+              // we need to apply the texture to them now and tell Three.js to update
+              if (reticle && reticle.material) {
+                reticle.material.map = mapTexture;
+                reticle.material.needsUpdate = true;  // Force material to refresh
+              }
+              if (placedPlane && placedPlane.material) {
+                placedPlane.material.map = mapTexture;
+                placedPlane.material.needsUpdate = true;
+              }
+            },
+            undefined,  // PROGRESS CALLBACK: Not used (undefined = no progress tracking)
+            (err) => {
+              // ERROR CALLBACK: Called if the image fails to load
+              console.warn("Failed to load nrkpg-map.png texture", err);
+              // We continue anyway - the plane will just be white without the texture
+            }
+          );
+
+          // ============================================================================
+          // RETICLE (PREVIEW INDICATOR) CREATION
+          // ============================================================================
+          // The reticle is a semi-transparent preview of the map that follows your phone's aim.
+          // It shows where the plane will be placed when you tap, giving visual feedback.
+          
+          const reticleGeometry = new THREE.PlaneGeometry(0.4, 0.4);
+          // PlaneGeometry: Creates a flat square (width=0.4m, height=0.4m, same size as the final plane)
+          // By default, the plane's normal (perpendicular direction) points in the +Z direction
+          
+          const reticleMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffffff,           // Base color (white, but texture will override)
+            map: mapTexture || null,   // Apply the map texture (null if not loaded yet)
+            side: THREE.DoubleSide,    // Render both sides (so it's visible from any angle)
+            transparent: true,         // Enable transparency
+            opacity: 0.6              // 60% opacity so you can see through it to the real world
+          });
+          // MeshBasicMaterial: Simple material that doesn't respond to lights (always fully lit)
+          // Good for previews because it's always visible regardless of lighting
+          
+          reticle = new THREE.Mesh(reticleGeometry, reticleMaterial);
+          // Mesh: Combines geometry (shape) and material (appearance) into a renderable 3D object
+          
+          reticle.visible = false;
+          // Start hidden. Will be shown when placement mode is ON and we detect a surface.
+          
+          scene.add(reticle);
+          // Add to the scene so it gets rendered (but won't show until visible = true)
+
+          // ============================================================================
+          // PLANE ORIENTATION OFFSET (ROTATION QUATERNION)
+          // ============================================================================
+          // This quaternion rotates geometries so they lie flat on horizontal surfaces.
+          // 
+          // Problem: THREE.PlaneGeometry has its normal pointing +Z (forward in local space).
+          //          Real-world horizontal surfaces (floors, tables) have normals pointing +Y (up).
+          // Solution: Rotate -90° around X-axis, so +Z becomes +Y.
+          // 
+          // This rotation is applied to both the reticle and the placed plane so they align
+          // with the detected surface orientation from AR hit-testing.
+          
+          planeOrientationOffset = new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(-Math.PI / 2, 0, 0)
+          );
+          // Quaternion: A mathematical representation of rotation (more efficient than Euler angles)
+          // Euler(-Math.PI/2, 0, 0): Rotate -90 degrees around X-axis, 0 around Y, 0 around Z
+          // Math.PI / 2 = 90 degrees in radians
+
+          window.addEventListener("resize", () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+          });
+        }
+
+          // ============================================================================
+          // START AR SESSION
+          // ============================================================================
+        async function startAR() {
+          // If Three.js hasn't been initialized yet, do it now
+          if (!renderer) setupThree();
+
+          // Request an immersive AR session from the browser/device
+          xrSession = await navigator.xr.requestSession("immersive-ar", {
+            // "immersive-ar" = full-screen AR mode (camera feed + 3D graphics overlaid)
+            
+            requiredFeatures: ["hit-test"],
+            // hit-test: Required feature that lets us detect real-world surfaces
+            // This is essential for placing the map plane on floors/tables
+            
+            optionalFeatures: ["anchors", "local-floor", "dom-overlay"],
+            // anchors: Optional feature for stable positioning (keeps objects locked to real world)
+            // local-floor: Optional feature for better floor tracking
+            // dom-overlay: Optional feature that lets HTML UI appear over the AR view
+            
+            domOverlay: { root: document.body }
+            // This allows our HTML buttons/UI to appear on top of the AR camera feed
+            // Without this, the UI would be hidden when in AR mode
+          });
+
+          // ============================================================================
+          // AR SESSION END HANDLER
+          // ============================================================================
+          // When the user exits AR (by closing the session), clean up and restore the UI.
+          // This event fires when the session ends for any reason (user closes, error, etc.)
+
+          xrSession.addEventListener("end", () => {
+            // Clear all AR-related state
+            xrSession = null;                    // No active session anymore
+            hitTestSourceRequested = false;     // Reset flag so we can request hit-test again next time
+            hitTestSource = null;               // Clear the hit-test source
+            planeAnchor = null;                 // Clear the anchor (if one was created)
+            
+            if (renderer && renderer.xr) {
+              renderer.xr.setSession(null);
+              // Disconnect the renderer from the XR session
+            }
+
+            // Restore UI to pre-AR state (show "Enter AR" button, hide AR controls)
+            enterARButton.style.display = "block";
+            placementToggleButton.style.display = "none";
+            centerReticleEl.style.display = "none";
+            instructionsEl.textContent = 'Tap "Enter AR" to start, then move your phone to find a surface.';
+          });
+
+          // ============================================================================
+          // CONFIGURE RENDERER AND REQUEST REFERENCE SPACE
+          // ============================================================================
+
+          renderer.xr.setReferenceSpaceType("local-floor");
+          // Tell the renderer to use "local-floor" coordinate system
+          // This means: origin is where the session started, Y points up, Z points forward
+          // "local-floor" assumes the user is standing on a floor (better than "local" for AR)
+          
+          await renderer.xr.setSession(xrSession);
+          // Connect the Three.js renderer to the XR session
+          // This makes the renderer start drawing to the AR view instead of the browser window
+
+          referenceSpace = await xrSession.requestReferenceSpace("local-floor");
+          // Request the reference space that defines our coordinate system
+          // All AR poses (positions/orientations) will be relative to this space
+          // We store it so we can convert hit-test results and anchor poses to our coordinate system
+
+          const gl = renderer.getContext();
+          // Get the WebGL context (not used here, but sometimes needed for advanced features)
+
+          // ============================================================================
+          // START THE AR RENDER LOOP
+          // ============================================================================
+          // requestAnimationFrame starts the continuous rendering loop.
+          // onXRFrame will be called every frame (typically 60 times per second) to update and render.
+          
+          xrSession.requestAnimationFrame(onXRFrame);
+          // This is like window.requestAnimationFrame but for XR sessions
+          // onXRFrame will handle hit-testing, updating the reticle, rendering, etc.
+
+          // ============================================================================
+          // UPDATE UI FOR AR MODE
+          // ============================================================================
+          // Hide the "Enter AR" button and show AR-specific controls
+          
+          enterARButton.style.display = "none";           // Hide entry button
+          placementToggleButton.style.display = "block";  // Show placement toggle
+          centerReticleEl.style.display = "block";        // Show center reticle (crosshair)
+          
+          placementMode = true;  // Start in placement mode (user can place/move the plane)
+          placementToggleButton.textContent = "Placement: ON";
+          instructionsEl.textContent =
+            "Placement mode: ON – move to find a surface, then tap to place a plane.";
+
+          // ============================================================================
+          // TAP/SELECT EVENT HANDLER
+          // ============================================================================
+          // This function is called whenever the user taps the screen (or presses a button in AR).
+          // It handles placement mode: Tap places or moves the map plane
+          
+          const onSelect = (event) => {
+            // Check if this select event should be ignored (e.g., user just clicked a UI button)
+            if (blockNextSelect) {
+              blockNextSelect = false;  // Reset the flag
+              return; // Ignore this select - it was triggered by UI interaction, not a real tap
+            }
+            
+            // Get the current XR frame (contains all tracking data for this moment in time)
+            const frame = event.frame;
+            if (!frame || !hitTestSource || !referenceSpace) return;
+            // Safety check: need frame, hit-test source, and reference space to do anything
+            
+            // Perform hit-test: detect what real-world surface the user is pointing at
+            const hitTestResults = frame.getHitTestResults(hitTestSource);
+            if (hitTestResults.length === 0) return;
+            // If no surface detected, do nothing (user might be pointing at empty space)
+
+            // Get the first (closest) hit result
+            const hit = hitTestResults[0];
+            // Convert the hit result to a pose (position + orientation) in our reference space
+            const pose = hit.getPose(referenceSpace);
+            if (!pose) return;
+            // Pose contains: pose.transform.position (x, y, z) and pose.transform.orientation (quaternion)
+
+            // ============================================================================
+            // HANDLE TAP BASED ON CURRENT MODE
+            // ============================================================================
+            
+            // MODE 1: Placement mode ON - Place or move the map plane
+            if (placementMode) {
+              // Try to create an XR anchor for stable positioning (if device supports it)
+              if (xrSession.requestAnchor) {
+                // Anchors lock objects to real-world locations, preventing drift
+                xrSession
+                  .requestAnchor(pose.transform, referenceSpace)
+                  .then((anchor) => {
+                    // SUCCESS: Anchor created
+                    planeAnchor = anchor;  // Store the anchor
+                    placeOrMovePlaneFromPose(pose);  // Place the plane at the hit location
+
+                    // Store reference to our plane object in the anchor (for cleanup if needed)
+                    anchor.context = { threeObject: placedPlane };
+
+                    // If the anchor gets removed (e.g., tracking lost), clear our reference
+                    anchor.addEventListener("remove", () => {
+                      planeAnchor = null;
+                    });
+                  })
+                  .catch(() => {
+                    // FAILED: Anchor creation failed (device might not support it)
+                    // Fallback: just place the plane without an anchor (less stable but works)
+                    planeAnchor = null;
+                    placeOrMovePlaneFromPose(pose);
+                  });
+              } else {
+                // Device doesn't support anchors - place plane without one
+                planeAnchor = null;
+                placeOrMovePlaneFromPose(pose);
+              }
+            }
+            // If placement mode is OFF, taps do nothing (safe for UI interaction)
+          };
+
+          // Register the onSelect handler to listen for tap/select events from the XR session
+          xrSession.addEventListener("select", onSelect);
+          // "select" event fires when user taps screen, presses trigger button, etc.
+        }
+
+        // ============================================================================
+        // PLACE PLANE ON MARKER
+        // ============================================================================
+        // ============================================================================
+        // PLACE OR MOVE THE MAP PLANE
+        // ============================================================================
+        // This function positions the map plane at the location where the user tapped.
+        // Called from onSelect when placement mode is ON and user taps a surface.
+        // 
+        // If the plane doesn't exist yet, it creates it and loads events/roads.
+        // If the plane already exists, it just moves it to the new location.
+
+        function placeOrMovePlaneFromPose(pose) {
+          // Remember if this is the first time placing the plane (vs. moving an existing one)
+          const wasNewPlane = !placedPlane;
+          
+          // ============================================================================
+          // CREATE THE PLANE MESH (ONLY IF IT DOESN'T EXIST YET)
+          // ============================================================================
+          
+          if (!placedPlane) {
+            // Create a 40cm x 40cm square plane geometry
+            const geometry = new THREE.PlaneGeometry(0.4, 0.4);
+            // This matches the physical size we want in the real world (0.4 meters = 40cm)
+            
+            // Create a material that responds to lighting and shows the map texture
+            const material = new THREE.MeshStandardMaterial({
+              color: 0xffffff,           // Base color (white, texture will show on top)
+              map: mapTexture || null,   // Apply the map image as a texture
+              metalness: 0.1,            // Slight metallic reflection (makes it look more realistic)
+              roughness: 0.5,            // Medium roughness (not too shiny, not too matte)
+              side: THREE.DoubleSide,    // Render both sides (visible from above and below)
+              transparent: true,         // Enable transparency
+              opacity: 0.9              // 90% opaque (slightly see-through)
+            });
+            // MeshStandardMaterial: Physically-based material that responds to lights
+            // This makes the plane look more realistic in the AR environment
+            
+            // Combine geometry and material into a mesh (the actual 3D object)
+            placedPlane = new THREE.Mesh(geometry, material);
+            
+            // Enable shadows (plane can cast and receive shadows from lights)
+            placedPlane.castShadow = true;
+            placedPlane.receiveShadow = true;
+
+            // Debug axes: 10cm per axis in plane local space (X=red, Y=green, Z=blue)
+            const axesHelper = new THREE.AxesHelper(0.1); // 0.1m = 10cm
+            axesHelper.name = "planeDebugAxes";
+            placedPlane.add(axesHelper);
+
+            // Add the plane (with attached axes) to the scene so it gets rendered
+            scene.add(placedPlane);
+          }
+
+          // ============================================================================
+          // POSITION AND ORIENT THE PLANE
+          // ============================================================================
+          
+          // Extract position and orientation from the hit-test pose
+          const { position, orientation } = pose.transform;
+          // position: { x, y, z } - where in 3D space to place the plane
+          // orientation: { x, y, z, w } - quaternion representing the surface's rotation
+          
+          // Set the plane's position to the hit location
+          placedPlane.position.set(position.x, position.y, position.z);
+
+          // Apply the surface's orientation, then rotate -90° around X so plane lies flat
+          if (planeOrientationOffset) {
+            // Combine the hit-test orientation with our -90° X rotation
+            placedPlane.quaternion
+              .set(orientation.x, orientation.y, orientation.z, orientation.w)  // Hit-test orientation
+              .multiply(planeOrientationOffset);  // Then rotate -90° around X
+            // Result: plane aligns with the detected surface and lies flat (not standing up)
+          } else {
+            // Fallback: just use hit-test orientation directly (plane might stand up)
+            placedPlane.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
+          }
+
+          // ============================================================================
+          // LOAD DATA ON FIRST PLACEMENT, UPDATE ON SUBSEQUENT MOVES
+          // ============================================================================
+          
+          if (wasNewPlane) {
+            // FIRST TIME: Load events and roads from files, then add them to the plane
+            loadEvents().then(() => {
+              addEventsToPlane();  // Create event marker spheres and attach to plane
+            });
+            loadRoads().then(() => {
+              addRoadsToPlane();   // Create road ribbon meshes and attach to plane
+            });
+          } else {
+            // SUBSEQUENT MOVES: Events and roads are already loaded and attached as children
+            // Since they're children of the plane, they automatically move/rotate with it.
+            // We just need to ensure they're still properly positioned (in case something changed).
+            if (eventMarkers.length > 0) {
+              addEventsToPlane();  // Re-adds event markers (handles case where group was cleared)
+            }
+            if (roadMeshes.length > 0) {
+              addRoadsToPlane();   // Re-adds road meshes (handles case where group was cleared)
+            }
+          }
+        }
+
+        // ============================================================================
+        // AR RENDER LOOP (CALLED EVERY FRAME)
+        // ============================================================================
+        // This function runs continuously while in AR mode (typically 60 times per second).
+        // It handles:
+        //   1. Requesting hit-test source (first frame only)
+        //   2. Updating the reticle position/orientation to follow where you're pointing
+        //   3. Updating the plane position if it's anchored (to keep it stable)
+        //   4. Rendering the scene to the AR view
+
+        function onXRFrame(time, frame) {
+          // Get the XR session from this frame
+          const session = frame.session;
+          
+          // Schedule the next frame (this creates the continuous loop)
+          session.requestAnimationFrame(onXRFrame);
+          // This is like a recursive call - onXRFrame calls itself to keep rendering
+
+          // Get the viewer's pose (where the phone/camera is in 3D space)
+          const pose = frame.getViewerPose(referenceSpace);
+          if (!pose) return;
+          // If we can't get the pose, skip this frame (tracking might be lost)
+
+          // ============================================================================
+          // REQUEST HIT-TEST SOURCE (FIRST FRAME ONLY)
+          // ============================================================================
+          // Hit-test source is needed to detect surfaces. We request it once, then reuse it.
+
+          if (!hitTestSourceRequested) {
+            // Step 1: Get the "viewer" reference space (coordinate system relative to the camera)
+            const viewerSpacePromise = session.requestReferenceSpace("viewer");
+            
+            // Step 2: Once we have viewer space, request a hit-test source
+            const hitTestSourcePromise = viewerSpacePromise.then((viewerSpace) =>
+              session.requestHitTestSource({ space: viewerSpace })
+              // Hit-test source uses "viewer" space because we want to test along the camera's view ray
+            );
+
+            // Step 3: Store the hit-test source when it's ready
+            hitTestSourcePromise.then((source) => {
+              hitTestSource = source;
+              // Now we can use this source in future frames to detect surfaces
+            });
+
+            // Mark that we've requested it (so we don't request it again)
+            hitTestSourceRequested = true;
+          }
+
+          // ============================================================================
+          // UPDATE RETICLE (PREVIEW INDICATOR)
+          // ============================================================================
+          // The reticle shows where the plane will be placed. It follows your phone's aim.
+          // Only shown when placement mode is ON (so you can see where you'll place the plane).
+          
+          if (hitTestSource && referenceSpace && reticle && placementMode) {
+            // Perform hit-test: detect what surface the camera is pointing at
+            const hitTestResults = frame.getHitTestResults(hitTestSource);
+            
+            if (hitTestResults.length > 0) {
+              // Surface detected: show the reticle at that location
+              const hit = hitTestResults[0];
+              const hitPose = hit.getPose(referenceSpace);
+              
+              if (hitPose) {
+                // Extract position and orientation from the hit result
+                const { position, orientation } = hitPose.transform;
+                
+                // Make reticle visible and position it at the hit location
+                reticle.visible = true;
+                reticle.position.set(position.x, position.y, position.z);
+                
+                // Apply the same rotation as the plane (hit-test orientation + -90° X rotation)
+                if (planeOrientationOffset) {
+                  reticle.quaternion
+                    .set(orientation.x, orientation.y, orientation.z, orientation.w)
+                    .multiply(planeOrientationOffset);
+                } else {
+                  reticle.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
+                }
+              }
+            } else {
+              // No surface detected: hide the reticle
+              reticle.visible = false;
+              // User might be pointing at empty space (sky, wall too far, etc.)
+            }
+          }
+
+          // If we have an anchor, update plane from anchor pose to keep it fixed
+          if (planeAnchor && placedPlane) {
+            const anchorPose = frame.getPose(
+              planeAnchor.anchorSpace || planeAnchor.space || planeAnchor,
+              referenceSpace
+            );
+            if (anchorPose) {
+              const t = anchorPose.transform;
+              placedPlane.position.set(t.position.x, t.position.y, t.position.z);
+              if (planeOrientationOffset) {
+                placedPlane.quaternion
+                  .set(t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w)
+                  .multiply(planeOrientationOffset);
+              } else {
+                placedPlane.quaternion.set(
+                  t.orientation.x,
+                  t.orientation.y,
+                  t.orientation.z,
+                  t.orientation.w
+                );
+              }
+
+              // Keep the plane exactly on the detected surface (no extra offset here).
+              // Roads and markers handle their own tiny z-fighting offsets separately.
+              
+              // Update event marker and road positions (no need to remove/re-add, just update)
+              if (eventMarkers.length > 0) {
+                addEventsToPlane(); // Updates positions if already in scene, adds if not
+              }
+              if (roadMeshes.length > 0) {
+                addRoadsToPlane(); // Updates positions if already in scene, adds if not
+              }
+            }
+          }
+
+          renderer.render(scene, camera);
+        }
+
+        // Convert levelcomfort (1-5) to color (blue to red gradient)
+        function getComfortColor(level) {
+          // Clamp level between 1 and 5
+          level = Math.max(1, Math.min(5, level));
+          // Normalize to 0-1 (1 = blue, 5 = red)
+          const t = (level - 1) / 4;
+          
+          // Interpolate from blue (0x2563eb) to red (0xef4444)
+          const blue = { r: 0x25, g: 0x63, b: 0xeb };
+          const red = { r: 0xef, g: 0x44, b: 0x44 };
+          
+          const r = Math.round(blue.r + (red.r - blue.r) * t);
+          const g = Math.round(blue.g + (red.g - blue.g) * t);
+          const b = Math.round(blue.b + (red.b - blue.b) * t);
+          
+          return (r << 16) | (g << 8) | b;
+        }
+
+        // ============================================================================
+        // COORDINATE PROJECTION: LAT/LON → PLANE COORDINATES
+        // ============================================================================
+        
+        function projectToMapSurface(lat, lon) {
+          // Get the four corner coordinates that define the map's geographic bounds
+          const { topLeft, topRight, bottomLeft, bottomRight } = mapCorners;
+          
+          // ============================================================================
+          // CALCULATE MAP BOUNDS
+          // ============================================================================
+          // Find the minimum and maximum latitude/longitude values from the corners.
+          // This defines the rectangular geographic area covered by the map.
+          
+          // Corner coordinate meanings:
+          //   topLeft:    [58.635427, 16.119594] - Northwest (high lat, low lon)
+          //   topRight:   [58.633813, 16.291792] - Northeast (high lat, high lon)
+          //   bottomLeft: [58.545631, 16.116729] - Southwest (low lat, low lon)
+          //   bottomRight:[58.544023, 16.288487] - Southeast (low lat, high lon)
+          
+          const minLat = Math.min(topLeft[0], topRight[0], bottomLeft[0], bottomRight[0]);
+          const maxLat = Math.max(topLeft[0], topRight[0], bottomLeft[0], bottomRight[0]);
+          const minLon = Math.min(topLeft[1], topRight[1], bottomLeft[1], bottomRight[1]);
+          const maxLon = Math.max(topLeft[1], topRight[1], bottomLeft[1], bottomRight[1]);
+          // These define the bounding box: [minLat, maxLat] × [minLon, maxLon]
+          
+          // ============================================================================
+          // NORMALIZE TO 0-1 RANGE
+          // ============================================================================
+          // Convert the input lat/lon into normalized coordinates (0.0 to 1.0) within the map bounds.
+          // This makes it easy to map to any coordinate system (0.0 = one edge, 1.0 = opposite edge).
+          
+          const normalizedLat = (lat - minLat) / (maxLat - minLat);
+          // 0.0 = southernmost edge (bottomLeft, bottomRight)
+          // 1.0 = northernmost edge (topLeft, topRight)
+          
+          const normalizedLon = (lon - minLon) / (maxLon - minLon);
+          // 0.0 = westernmost edge (topLeft, bottomLeft)
+          // 1.0 = easternmost edge (topRight, bottomRight)
+          
+          // ============================================================================
+          // MAP TO PLANE COORDINATES
+          // ============================================================================
+          // Convert normalized coordinates (0-1) to 3D coordinates on the plane.
+          // The plane is 0.4m × 0.4m, centered at origin, so coordinates range from -0.2 to +0.2.
+          
+          const x = (normalizedLon - 0.5) * 0.4;
+          // -0.2m = west edge (left side of plane)
+          //  0.0m = center (longitude-wise)
+          // +0.2m = east edge (right side of plane)
+          
+          const z = (normalizedLat - 0.5) * 0.4;
+          // -0.2m = south edge (back of plane)
+          //  0.0m = center (latitude-wise)
+          // +0.2m = north edge (front of plane)
+          
+          return [x, z];
+          // Return as [x, z] tuple (Y is always 0 for points on the plane surface)
+        }
+
+        // ============================================================================
+        // LOAD EVENT DATA FROM CSV FILE
+        // ============================================================================
+        // This function loads event data from a CSV file (events_nkpg_WGS84.csv).
+        // Each event has: ID, date/time, latitude, longitude, and comfort level.
+        // 
+        // The function:
+        //   1. Fetches and parses the CSV file
+        //   2. Extracts unique dates from the dateTimeEvent column
+        //   3. Projects each event's lat/lon to map plane coordinates
+        //   4. Stores all events in allEvents array
+        //   5. Sets up the date filter UI
+        //   6. Creates 3D marker spheres for the currently selected date
+        //
+        // Note: This only loads the data. The actual 3D markers are created by
+        // rebuildEventMarkersForActiveDate() and added to the scene by addEventsToPlane().
+        
+        async function loadEvents() {
+          // Prevent loading the file multiple times
+          if (eventsLoaded) return;
+          
+          try {
+            // ============================================================================
+            // FETCH AND PARSE CSV FILE
+            // ============================================================================
+            
+            const response = await fetch("events_nkpg_WGS84.csv");
+            // Fetch the CSV file from the server (relative to index.html location)
+            
+            const text = await response.text();
+            // Get the file contents as plain text
+            
+            const lines = text.trim().split("\n");
+            // Split into lines (one event per line, plus header line)
+            // trim() removes leading/trailing whitespace
+            
+            // ============================================================================
+            // PARSE EACH LINE (SKIP HEADER)
+            // ============================================================================
+            
+            const dateSet = new Set();
+            // Use a Set to collect unique dates (automatically handles duplicates)
+            
+            // Start from index 1 to skip the header line (index 0)
+            for (let i = 1; i < lines.length; i++) {
+              const line = lines[i].trim();
+              if (!line) continue;  // Skip empty lines
+              
+              // Split the line by commas (CSV format)
+              const parts = line.split(",");
+              if (parts.length < 6) continue;  // Need at least 6 columns
+              
+              // Extract columns (assuming CSV format: id, dateTimeEvent, lat, lon, ?, levelcomfort, ...)
+              const id = parts[0];                    // Event ID (unique identifier)
+              const dateTimeEvent = parts[1];         // Full date/time string: "YYYY/MM/DD HH:MM:SS.sss"
+              const lat = parseFloat(parts[2]);        // Latitude (WGS84, decimal degrees)
+              const lon = parseFloat(parts[3]);        // Longitude (WGS84, decimal degrees)
+              const levelcomfort = parseInt(parts[5]); // Comfort level (1-5, used for color)
+              
+              // Validate data: skip if any required field is missing or invalid
+              if (!dateTimeEvent || isNaN(lat) || isNaN(lon) || isNaN(levelcomfort)) continue;
+              
+              // ============================================================================
+              // EXTRACT DATE AND PROJECT TO MAP COORDINATES
+              // ============================================================================
+              
+              // Extract just the date portion (YYYY/MM/DD) from "YYYY/MM/DD HH:MM:SS.sss"
+              const datePart = dateTimeEvent.split(" ")[0];
+              // Split by space, take first part (the date)
+              if (!datePart) continue;  // Skip if no date found
+              
+              // Project the geographic coordinates to map plane coordinates
+              const [x, z] = projectToMapSurface(lat, lon);
+              // Returns [x, z] in meters from plane center (e.g., [-0.2, 0.2] range)
+              
+              // ============================================================================
+              // STORE EVENT DATA
+              // ============================================================================
+              
+              // Store the event as a plain JavaScript object
+              allEvents.push({
+                id,                    // Event ID
+                dateTimeEvent,         // Full date/time string
+                date: datePart,        // Just the date (YYYY/MM/DD)
+                lat,                   // Latitude (WGS84)
+                lon,                   // Longitude (WGS84)
+                levelcomfort,         // Comfort level (1-5)
+                localX: x,             // X coordinate on map plane (meters from center)
+                localZ: z              // Z coordinate on map plane (meters from center)
+              });
+              
+              // Add this date to the set of available dates
+              dateSet.add(datePart);
+            }
+            
+            // ============================================================================
+            // FINALIZE LOADING
+            // ============================================================================
+            
+            eventsLoaded = true;  // Mark as loaded to prevent reloading
+            console.log(`Loaded ${allEvents.length} events from WGS84 CSV`);
+            
+            // Convert date set to sorted array (for date navigation)
+            const dates = Array.from(dateSet).sort();
+            // Sort ensures dates are in chronological order
+            
+            // Set the first date as the default active date (if none is set)
+            if (!activeEventDate && dates.length > 0) {
+              activeEventDate = dates[0];
+            }
+            
+            // Populate the date filter UI (prev/next buttons, label)
+            populateEventDateFilter(dates);
+            
+            // Create 3D marker spheres for the currently selected date
+            rebuildEventMarkersForActiveDate();
+            // This creates the actual THREE.Mesh objects (spheres) but doesn't add them to scene yet
+            
+            // Note: We don't add markers to the scene here. That's done by addEventsToPlane()
+            // which is called after the plane is placed (from placeOrMovePlaneFromPose).
+            
+          } catch (err) {
+            console.error("Failed to load events:", err);
+            // If loading fails, the app continues but no events will be shown
+          }
+        }
+
+        // ============================================================================
+        // REBUILD EVENT MARKERS FOR ACTIVE DATE
+        // ============================================================================
+        // This function creates 3D sphere markers for all events matching the currently
+        // selected date (activeEventDate). It's called when:
+        //   - Events are first loaded (loadEvents)
+        //   - User changes the date (changeActiveDate)
+        //
+        // The function:
+        //   1. Disposes old markers (frees memory)
+        //   2. Filters allEvents to find events matching activeEventDate
+        //   3. Creates a sphere mesh for each matching event
+        //   4. Colors spheres based on comfort level (blue=low, red=high)
+        //   5. Stores markers in eventMarkers array (but doesn't add to scene yet)
+        //
+        // Note: Markers are added to the scene by addEventsToPlane(), which positions
+        // them on the map plane surface.
+        
+        function rebuildEventMarkersForActiveDate() {
+          // ============================================================================
+          // DISPOSE OLD MARKERS (FREE MEMORY)
+          // ============================================================================
+          // When changing dates, we need to remove the old markers and free their resources.
+          // This prevents memory leaks and ensures only the current date's markers exist.
+          
+          while (eventMarkers.length) {
+            const m = eventMarkers.pop();  // Remove marker from array
+            
+            // Dispose geometry (frees GPU memory)
+            if (m.geometry) m.geometry.dispose();
+            
+            // Dispose material (frees GPU memory)
+            if (m.material) m.material.dispose();
+            // Note: We don't need to dispose textures here because spheres don't use textures
+          }
+          
+          // If no date is selected, we're done (no markers to create)
+          if (!activeEventDate) return;
+          
+          // ============================================================================
+          // CREATE SPHERE MARKERS FOR MATCHING EVENTS
+          // ============================================================================
+          
+          for (const ev of allEvents) {
+            // Skip events that don't match the currently selected date
+            if (ev.date !== activeEventDate) continue;
+            
+            // ============================================================================
+            // CREATE SPHERE GEOMETRY
+            // ============================================================================
+            
+            const sphereGeo = new THREE.SphereGeometry(0.003, 8, 8);
+            // 0.003 = radius in meters (3mm, very small sphere)
+            // 8 = number of horizontal segments (around the sphere)
+            // 8 = number of vertical segments (from top to bottom)
+            // Lower segments = fewer triangles = better performance, but less smooth
+            
+            // ============================================================================
+            // GET COLOR BASED ON COMFORT LEVEL
+            // ============================================================================
+            
+            const color = getComfortColor(ev.levelcomfort);
+            // getComfortColor converts comfort level (1-5) to a color:
+            //   1 = blue (0x2563eb)
+            //   3 = purple (interpolated)
+            //   5 = red (0xef4444)
+            
+            // ============================================================================
+            // CREATE MATERIAL
+            // ============================================================================
+            
+              const sphereMat = new THREE.MeshStandardMaterial({
+              color: color,              // Base color (from comfort level)
+              metalness: 0.0,            // Not metallic (0 = matte)
+              roughness: 0.3,            // Slightly smooth (reflects some light)
+              emissive: color,            // Emissive color (makes it glow slightly)
+              emissiveIntensity: 0.3,    // 30% glow intensity (subtle glow)
+              transparent: true,         // Enable transparency
+              opacity: 0.9              // 90% opaque (slightly see-through)
+            });
+            // MeshStandardMaterial: Physically-based material that responds to lights
+            // Emissive makes the spheres glow, making them easier to see in AR
+            
+            // ============================================================================
+            // CREATE MESH AND STORE EVENT DATA
+            // ============================================================================
+            
+              const marker = new THREE.Mesh(sphereGeo, sphereMat);
+            // Combine geometry and material into a renderable 3D object
+              
+            // Store the event data in the marker's userData
+            // This lets us access the original event info later if needed
+              marker.userData = { 
+              ...ev,              // Copy all event properties (id, date, lat, lon, etc.)
+              isEventMarker: true // Flag to identify this as an event marker (not a user marker)
+            };
+            
+            // Add to the array (but don't add to scene yet - that's done by addEventsToPlane)
+              eventMarkers.push(marker);
+            }
+            
+          // ============================================================================
+          // UPDATE SCENE IF PLANE IS ALREADY PLACED
+          // ============================================================================
+          // If the plane is already in the scene, immediately add the new markers to it.
+          // This ensures markers appear right away when the user changes dates.
+          
+          if (placedPlane && placedPlane.userData?.eventsGroup) {
+            addEventsToPlane();  // This positions and adds markers to the eventsGroup
+          }
+        }
+
+        // ============================================================================
+        // ADD EVENT MARKERS TO THE PLANE SURFACE (Y = UP FROM PLANE)
+        // ============================================================================
+        // This function positions event marker spheres on the map plane surface and adds
+        // them to the scene. It's called:
+        //   - After the plane is first placed (from placeOrMovePlaneFromPose)
+        //   - When the user changes dates (from rebuildEventMarkersForActiveDate)
+        //   - When the plane moves (to update positions)
+        //
+        // Coordinate convention in plane local space:
+        //   - X: runs across the map (west ↔ east)
+        //   - Z: runs along the map (south ↔ north)
+        //   - Y: points straight \"up\" out of the map surface
+        //
+        // The function:
+        //   1. Creates an eventsGroup container (if it doesn't exist) as a child of the plane
+        //   2. Positions each marker using its pre-calculated localX/localZ coordinates
+        //   3. Lifts markers slightly in +Y above the plane to avoid z-fighting
+        //
+        // Since markers are children of the plane, they automatically move/rotate with it.
+        
+        function addEventsToPlane() {
+          // Safety check: need a plane and at least one marker to add
+          if (!placedPlane || eventMarkers.length === 0) return;
+
+          // ============================================================================
+          // CREATE EVENTS GROUP CONTAINER (FIRST TIME ONLY)
+          // ============================================================================
+          // The eventsGroup is a THREE.Group that holds all event markers.
+          // It's a child of the plane, so when the plane moves/rotates, all events move with it.
+          
+          if (!placedPlane.userData.eventsGroup) {
+            // Create a new group to hold all event markers
+            const eventsGroup = new THREE.Group();
+            // THREE.Group: A container object that can hold multiple 3D objects
+            // It has its own transform (position, rotation, scale) that applies to all children
+            
+            eventsGroup.name = "eventsGroup";
+            // Give it a name for debugging (helps identify it in the scene graph)
+            
+            // Add the group as a child of the plane
+            placedPlane.add(eventsGroup);
+            // Now eventsGroup is parented to placedPlane, so it inherits the plane's transform
+            // When the plane moves/rotates, the eventsGroup (and all its children) move too
+
+            // Start with 0 rotation around Y axis
+            // Use the rotation controls in the UI to adjust alignment if needed
+            // The controls allow ±15° increments for fine-tuning
+            eventsGroup.rotation.y = 0;
+
+            // Store the group in the plane's userData so we can access it later
+            placedPlane.userData.eventsGroup = eventsGroup;
+          }
+
+          // Get the events group (either newly created or existing)
+          const eventsGroup = placedPlane.userData.eventsGroup;
+          if (!eventsGroup) return;  // Safety check (shouldn't happen)
+
+          // ============================================================================
+          // CLEAR EXISTING MARKERS (BEFORE ADDING NEW ONES)
+          // ============================================================================
+          // When changing dates, we need to remove old markers before adding new ones.
+          // This ensures only the current date's markers are visible.
+          
+          while (eventsGroup.children.length) {
+            eventsGroup.remove(eventsGroup.children[0]);
+            // Remove each child from the group (but don't dispose - that's done in rebuildEventMarkersForActiveDate)
+          }
+
+          // ============================================================================
+          // POSITION AND ADD ALL MARKERS
+          // ============================================================================
+          
+            for (const marker of eventMarkers) {
+            // Position the marker using its pre-calculated coordinates
+            // Z is the normal (upwards), so we use Z for height
+              
+              // For future timestamp-based height normalization:
+              // const dateTimeEvent = marker.userData.dateTimeEvent; // Format: "YYYY/MM/DD HH:MM:SS.sss"
+              // const eventDate = new Date(dateTimeEvent.replace(/\//g, '-')); // Convert to Date object
+              // const normalizedHeight = calculateHeightFromTimestamp(eventDate); // Normalize to 0-1 range
+              // const height = 0.5 + (normalizedHeight * 1.5); // Scale to 0.5m - 2.0m range (or your desired range)
+              
+              marker.position.set(
+              marker.userData.localX,  // X = longitude direction (west-east)
+              marker.userData.localZ,  // Y = latitude direction (south-north)
+              0.3                       // Z = 0.3 meter above plane surface (temporary fixed height)
+            );
+            // localX and localZ were calculated in loadEvents() using projectToMapSurface()
+            
+            // Reset rotation (spheres don't need rotation, they look the same from all angles)
+              marker.quaternion.identity();
+            // identity quaternion = no rotation
+              
+            // Add the marker to the events group
+              eventsGroup.add(marker);
+            // Now the marker is a child of eventsGroup, which is a child of placedPlane
+            // It will automatically move/rotate with the plane
+          }
+
+          // ============================================================================
+          // DONE - MARKERS ARE NOW IN THE SCENE
+          // ============================================================================
+          // Since markers are children of the plane, they automatically follow the plane's
+          // position and rotation. No need to update them manually when the plane moves.
+        }
+
+        // Remove event markers from scene
+        function removeEventsFromPlane() {
+          // Events are now in a group, so we don't need to remove them individually
+          // The group will be removed when the plane is removed
+          const eventsGroup = placedPlane?.userData?.eventsGroup;
+          if (eventsGroup) {
+            // Clear the group reference
+            placedPlane.userData.eventsGroup = null;
+          }
+        }
+
+        // ============================================================================
+        // CREATE RIBBON GEOMETRY (THICK LINE STRIP, Y = 0 IS MAP SURFACE)
+        // ============================================================================
+        // This function creates a flat ribbon (strip) geometry along a series of points.
+        // It's used to render roads as thick lines instead of thin 1-pixel lines.
+        //
+        // Coordinate convention used for roads:
+        //   - Input points are in plane local space
+        //   - X/Z lie on the map surface
+        //   - Y = 0 is exactly the plane surface; positive Y is \"up\" from the plane
+        //
+        // How it works:
+        //   - Takes a series of points (the road centerline)
+        //   - For each segment between two points, creates a quad (rectangle)
+        //   - The quad is perpendicular to the road direction in the XZ plane, with width = `width`
+        //   - Quads are connected to form a continuous ribbon
+        //
+        // This is much cheaper than TubeGeometry (which creates a 3D tube) but still
+        // gives a visually thick line. The ribbon lies flat in the XZ plane (Y=0).
+        //
+        // Input:  points (array of THREE.Vector3), width (meters)
+        // Output: THREE.BufferGeometry (ready to use with a material)
+        
+        function createRibbonGeometry(points, width) {
+          // Safety check: need at least 2 points to make a line
+          if (!points || points.length < 2) return null;
+
+          // ============================================================================
+          // SETUP
+          // ============================================================================
+          
+          const halfWidth = width / 2;
+          // Half-width: we'll offset points by this amount on each side of the centerline
+          
+          const positions = [];
+          // Array to store vertex positions (x, y, z for each vertex)
+          // Format: [x1, y1, z1, x2, y2, z2, ...]
+          
+          const indices = [];
+          // Array to store triangle indices (which vertices form each triangle)
+          // Format: [v1, v2, v3, v4, v5, v6, ...] where each triplet is one triangle
+
+          // ============================================================================
+          // CREATE QUAD FOR EACH SEGMENT
+          // ============================================================================
+          // For each pair of consecutive points, create a quad (rectangle) perpendicular
+          // to the road direction. This forms a continuous ribbon.
+          
+          for (let i = 0; i < points.length - 1; i++) {
+            const p1 = points[i];      // Start point of this segment
+            const p2 = points[i + 1];  // End point of this segment
+
+            // ============================================================================
+            // CALCULATE PERPENDICULAR DIRECTION
+            // ============================================================================
+            
+            // Calculate the direction vector from p1 to p2, then normalize it
+            const dir = new THREE.Vector3().subVectors(p2, p1).normalize();
+            // This gives us the direction the road is heading (normalized to length 1)
+            
+            // Calculate a perpendicular vector in the XY plane
+            // In XY plane, if direction is (dx, dy, 0), perpendicular is (-dy, dx, 0)
+            const perp = new THREE.Vector3(-dir.y, dir.x, 0).multiplyScalar(halfWidth);
+            // This points perpendicular to the road direction, with length = halfWidth
+            // We'll use this to offset vertices on each side of the centerline
+
+            // ============================================================================
+            // CREATE FOUR VERTICES FOR THE QUAD
+            // ============================================================================
+            // A quad (rectangle) needs 4 vertices. We create them by offsetting the
+            // centerline points by the perpendicular vector.
+            
+            const v1 = new THREE.Vector3().addVectors(p1, perp);  // Left side, start
+            const v2 = new THREE.Vector3().subVectors(p1, perp);  // Right side, start
+            const v3 = new THREE.Vector3().addVectors(p2, perp);  // Left side, end
+            const v4 = new THREE.Vector3().subVectors(p2, perp);  // Right side, end
+            // v1 and v3 are on one side of the road, v2 and v4 are on the other side
+
+            // ============================================================================
+            // ADD VERTICES TO POSITIONS ARRAY
+            // ============================================================================
+            
+            const baseIndex = positions.length / 3;
+            // Calculate the starting index for this quad's vertices
+            // (positions.length / 3 because each vertex has 3 components: x, y, z)
+            
+            // Add all 4 vertices to the positions array
+            positions.push(
+              v1.x, v1.y, v1.z,  // Vertex 0: left side, start
+              v2.x, v2.y, v2.z,  // Vertex 1: right side, start
+              v3.x, v3.y, v3.z,  // Vertex 2: left side, end
+              v4.x, v4.y, v4.z   // Vertex 3: right side, end
+            );
+
+            // ============================================================================
+            // CREATE TWO TRIANGLES TO FORM THE QUAD
+            // ============================================================================
+            // A quad is made of 2 triangles. We define them using vertex indices.
+            // Triangle 1: v1 (baseIndex), v2 (baseIndex+1), v3 (baseIndex+2)
+            // Triangle 2: v2 (baseIndex+1), v4 (baseIndex+3), v3 (baseIndex+2)
+            
+            indices.push(
+              baseIndex, baseIndex + 1, baseIndex + 2,      // First triangle
+              baseIndex + 1, baseIndex + 3, baseIndex + 2   // Second triangle
+            );
+            // This creates a quad that connects this segment to the next segment
+          }
+
+          // ============================================================================
+          // CREATE BUFFER GEOMETRY
+          // ============================================================================
+          
+          const geometry = new THREE.BufferGeometry();
+          // BufferGeometry: Efficient way to store geometry data in GPU-friendly format
+          
+          // Set the vertex positions
+          geometry.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(positions, 3)
+          );
+          // Float32BufferAttribute: Stores positions as 32-bit floats
+          // 3 = number of components per vertex (x, y, z)
+          
+          // Set the triangle indices
+          geometry.setIndex(indices);
+          // This tells Three.js which vertices form which triangles
+          
+          // Compute vertex normals (needed for lighting calculations)
+          geometry.computeVertexNormals();
+          // Normals tell the GPU which direction each vertex faces (for lighting/shading)
+          
+          return geometry;
+          // Return the completed geometry, ready to use with a material
+        }
+
+        // ============================================================================
+        // LOAD ROAD DATA FROM GEOJSON FILE
+        // ============================================================================
+        // This function loads road network data from a GeoJSON file (roads_nkpg_wgs84.geojson).
+        // The GeoJSON contains MultiLineString features, where each feature represents a road.
+        //
+        // The function:
+        //   1. Fetches and parses the GeoJSON file
+        //   2. Iterates through all features (roads)
+        //   3. Projects each road's coordinates from lat/lon to map plane coordinates
+        //   4. Creates ribbon geometries (thick flat strips) for each road segment
+        //   5. Stores road meshes in roadMeshes array
+        //
+        // Note: This only loads the data and creates meshes. The meshes are added to
+        // the scene by addRoadsToPlane(), which is called after the plane is placed.
+        
+        async function loadRoads() {
+          // Prevent loading the file multiple times
+          if (roadsLoaded) return;
+          
+          try {
+            // ============================================================================
+            // FETCH AND PARSE GEOJSON FILE
+            // ============================================================================
+            
+            const response = await fetch("roads_nkpg_wgs84.geojson");
+            // Fetch the GeoJSON file from the server (relative to index.html location)
+            
+            const geojson = await response.json();
+            // Parse the JSON response into a JavaScript object
+            
+            // Validate GeoJSON structure
+            if (!geojson.features || !Array.isArray(geojson.features)) {
+              console.error("Invalid GeoJSON structure");
+              return;
+            }
+            // GeoJSON should have a "features" array containing all road features
+
+            // ============================================================================
+            // PROCESS EACH ROAD FEATURE
+            // ============================================================================
+            
+            let roadCount = 0;
+            // Counter to track how many road segments we've created
+
+            // Iterate through all features in the GeoJSON
+            for (const feature of geojson.features) {
+              // Skip features that aren't MultiLineString (our roads are MultiLineString)
+              if (!feature.geometry || feature.geometry.type !== "MultiLineString") {
+                continue;
+              }
+              // MultiLineString: A geometry type that contains multiple line strings
+              // Each line string is a series of connected points forming a road segment
+
+              // Get the coordinates array (contains all line strings for this road)
+              const coordinates = feature.geometry.coordinates;
+              if (!coordinates || !Array.isArray(coordinates)) continue;
+
+              // ============================================================================
+              // PROCESS EACH LINE STRING (ROAD SEGMENT)
+              // ============================================================================
+              // A MultiLineString can contain multiple line strings (e.g., a road with branches)
+              
+              for (const lineString of coordinates) {
+                // Skip invalid line strings (need at least 2 points to make a line)
+                if (!Array.isArray(lineString) || lineString.length < 2) continue;
+
+                // ============================================================================
+                // PROJECT COORDINATES TO MAP SURFACE
+                // ============================================================================
+                // Convert each geographic coordinate (lat/lon) to map plane coordinates (x/z)
+                
+                const projectedPoints = [];
+                // Array to store projected 3D points (THREE.Vector3 objects)
+                
+                for (const coord of lineString) {
+                  // GeoJSON format: coordinates are [longitude, latitude] (note: lon first!)
+                  const lon = coord[0];  // Longitude (east-west)
+                  const lat = coord[1];  // Latitude (north-south)
+                  
+                  // Skip invalid coordinates
+                  if (isNaN(lon) || isNaN(lat)) continue;
+                  
+                  // Project to map surface coordinates
+                  const [x, z] = projectToMapSurface(lat, lon);
+                  // Returns [x, z] in meters from plane center
+                  
+                  // Create a 3D point in XY plane (Z=0 is the map surface, Z>0 is up)
+                  // This ensures Z is the normal (upwards) for rotations
+                  projectedPoints.push(new THREE.Vector3(x, z, 0));
+                  // THREE.Vector3: Represents a 3D point (x, y, z)
+                }
+
+                // Skip if we don't have enough points (need at least 2 for a line)
+                if (projectedPoints.length < 2) continue;
+
+                // ============================================================================
+                // CREATE RIBBON GEOMETRY
+                // ============================================================================
+                // Create a flat ribbon (thick strip) along the road centerline
+                
+                const ribbonWidth = 0.002; // 2mm wide ribbon (adjust as desired)
+                // This makes roads visible but not too thick
+                
+                const geometry = createRibbonGeometry(projectedPoints, ribbonWidth);
+                // createRibbonGeometry creates a flat strip geometry from the points
+                if (!geometry) continue;  // Skip if geometry creation failed
+
+                // ============================================================================
+                // CREATE MATERIAL AND MESH
+                // ============================================================================
+                
+                // Create a simple black material (roads are black), with polygonOffset to
+                // force them to render cleanly on top of the map texture and avoid z-fighting
+                const roadMaterial = new THREE.MeshBasicMaterial({
+                  color: 0x000000,        // Black color
+                  side: THREE.DoubleSide, // Render both sides (visible from above and below)
+                  polygonOffset: true,
+                  polygonOffsetFactor: -1,
+                  polygonOffsetUnits: -1
+                });
+                // MeshBasicMaterial: Simple material that doesn't respond to lights
+                // polygonOffset: shifts depth values slightly so roads win depth test over the plane
+
+                // Combine geometry and material into a mesh (the actual 3D object)
+                const roadMesh = new THREE.Mesh(geometry, roadMaterial);
+                
+                // Store metadata in userData (for debugging or future use)
+                roadMesh.userData = { 
+                  isRoad: true,                    // Flag to identify this as a road
+                  localPoints: projectedPoints     // Store the original points (for debugging)
+                };
+                
+                // Add to the array (but don't add to scene yet - that's done by addRoadsToPlane)
+                roadMeshes.push(roadMesh);
+                roadCount++;
+              }
+            }
+
+            // ============================================================================
+            // FINALIZE LOADING
+            // ============================================================================
+            
+            roadsLoaded = true;  // Mark as loaded to prevent reloading
+            console.log(`Loaded ${roadCount} road segments`);
+
+            // Note: We don't add roads to the scene here. That's done by addRoadsToPlane()
+            // which is called after the plane is placed (from placeOrMovePlaneFromPose).
+            
+          } catch (err) {
+            console.error("Failed to load roads:", err);
+            // If loading fails, the app continues but no roads will be shown
+          }
+        }
+
+        // ============================================================================
+        // ADD ROAD MESHES TO THE PLANE SURFACE (Y = UP FROM PLANE)
+        // ============================================================================
+        // This function positions road ribbon meshes on the map plane surface and adds
+        // them to the scene. It's called:
+        //   - After the plane is first placed (from placeOrMovePlaneFromPose)
+        //   - When the plane moves (to update positions)
+        //
+        // Coordinate convention in plane local space:
+        //   - X: runs across the map (west ↔ east)
+        //   - Z: runs along the map (south ↔ north)
+        //   - Y: points straight "up" out of the map surface
+        //
+        // The function:
+        //   1. Creates a roadsGroup container (if it doesn't exist) as a child of the plane
+        //   2. Positions road meshes so their geometry lies in the XZ plane at Y ≈ 0
+        //   3. Lifts roads slightly in +Y above the plane to avoid z-fighting
+        //   4. Adds all road meshes to the group
+        //
+        // Since roads are children of the plane, they automatically move/rotate with it.
+        
+        function addRoadsToPlane() {
+          // Safety check: need a plane and at least one road mesh to add
+          if (!placedPlane || roadMeshes.length === 0) return;
+
+          // ============================================================================
+          // CREATE ROADS GROUP CONTAINER (FIRST TIME ONLY)
+          // ============================================================================
+          // The roadsGroup is a THREE.Group that holds all road meshes.
+          // It's a child of the plane, so when the plane moves/rotates, all roads move with it.
+          
+          if (!placedPlane.userData.roadsGroup) {
+            // Create a new group to hold all road meshes
+            const roadsGroup = new THREE.Group();
+            // THREE.Group: A container object that can hold multiple 3D objects
+            // It has its own transform (position, rotation, scale) that applies to all children
+            
+            roadsGroup.name = "roadsGroup";
+            // Give it a name for debugging (helps identify it in the scene graph)
+            
+            // Add the group as a child of the plane
+            placedPlane.add(roadsGroup);
+            // Now roadsGroup is parented to placedPlane, so it inherits the plane's transform
+            // When the plane moves/rotates, the roadsGroup (and all its children) move too
+
+            // Start with 0 rotation - use UI controls to fine-tune alignment
+            roadsGroup.rotation.y = 0;
+
+            // ============================================================================
+            // ADD ALL ROAD MESHES TO THE GROUP
+            // ============================================================================
+            
+            for (const road of roadMeshes) {
+              // Roads are constructed in XY plane (Z=0 is the map surface, Z>0 is up)
+              // Z is the normal (upwards), matching AxesHelper orientation
+              // We keep their transform at the origin and rely on polygonOffset in the material
+              // to make them render cleanly on top of the map without z-fighting.
+              road.position.set(0, 0, 0);
+              
+              // Add the road mesh to the group
+              roadsGroup.add(road);
+              // Now the road is a child of roadsGroup, which is a child of placedPlane
+              // It will automatically move/rotate with the plane
+            }
+            
+            // Store the group in the plane's userData so we can access it later
+            placedPlane.userData.roadsGroup = roadsGroup;
+          }
+
+          // ============================================================================
+          // DONE - ROADS ARE NOW IN THE SCENE
+          // ============================================================================
+          // Since roads are children of the plane, they automatically follow the plane's
+          // position and rotation. No need to update them manually when the plane moves.
+          // 
+          // Note: If the roadsGroup already exists (from a previous call), we don't need
+          // to do anything - the roads are already in the scene and will move with the plane.
+        }
+
+        // Remove road meshes from scene
+        function removeRoadsFromPlane() {
+          for (const roadMesh of roadMeshes) {
+            scene.remove(roadMesh);
+          }
+        }
+
+        // Toggle placement mode (show/hide reticle and enable/disable tap placement)
+        placementToggleButton.addEventListener("click", () => {
+          blockNextSelect = true;
+          placementMode = !placementMode;
+          placementToggleButton.textContent = placementMode ? "Placement: ON" : "Placement: OFF";
+          instructionsEl.textContent = placementMode
+            ? "Placement mode: ON – move to find a surface, then tap to place a plane."
+            : "Placement mode: OFF – walk around and observe the plane or explore dates.";
+
+          if (!placementMode && reticle) {
+            reticle.visible = false;
+          }
+        });
+
+        enterARButton.addEventListener("click", () => {
+          startAR().catch((err) => {
+            console.error(err);
+            alert("Failed to start AR: " + err.message);
+          });
+        });
+
+        // ============================================================================
+        // DATE FILTERING UI FUNCTIONS
+        // ============================================================================
+        // These functions handle the date selection UI, allowing users to navigate through
+        // available dates and filter which events are displayed.
+        
+        // ============================================================================
+        // UPDATE DATE LABEL
+        // ============================================================================
+        // Updates the visible date label in the UI to show the currently selected date.
+        
+        function updateEventDateLabel() {
+          // Get the label element from the DOM
+          const labelEl = document.getElementById("event-date-label");
+          if (!labelEl) return;  // Safety check (element might not exist yet)
+          
+          // Set the label text to the active date, or "No date" if none is selected
+          labelEl.textContent = activeEventDate || "No date";
+        }
+
+        // ============================================================================
+        // POPULATE DATE FILTER
+        // ============================================================================
+        // Initializes the date filter with available dates from the loaded event data.
+        // Called once when events are loaded.
+        
+        function populateEventDateFilter(dates) {
+          // Store the available dates (sorted array of unique dates)
+          availableEventDates = dates || [];
+          
+          // If no date is currently selected, select the first available date
+          if (!activeEventDate && availableEventDates.length > 0) {
+            activeEventDate = availableEventDates[0];
+          }
+          
+          // Update the UI label to show the selected date
+          updateEventDateLabel();
+        }
+
+        // ============================================================================
+        // DATE NAVIGATION UI SETUP
+        // ============================================================================
+        // Get references to the date navigation UI elements (prev/next buttons and label).
+        // Set up event listeners to prevent XR select events when clicking these elements.
+        
+        const eventDatePrev = document.getElementById("event-date-prev");
+        const eventDateNext = document.getElementById("event-date-next");
+        const eventDateLabel = document.getElementById("event-date-label");
+
+        // Collect all date UI elements into an array (filter out nulls in case elements don't exist)
+        const dateUiElements = [eventDatePrev, eventDateNext, eventDateLabel].filter(Boolean);
+        
+        // For each UI element, add event listeners to prevent XR select events
+        dateUiElements.forEach((el) => {
+          // Listen for multiple event types (pointer, mouse, touch, click) to cover all devices
+          ["pointerdown", "mousedown", "touchstart", "click"].forEach((evt) => {
+            el.addEventListener(evt, () => {
+              // Set blockNextSelect to true so the XR select handler ignores the next select event
+              // This prevents tapping the date UI from moving the plane
+          blockNextSelect = true;
+            });
+          });
+        });
+
+        // ============================================================================
+        // CHANGE ACTIVE DATE
+        // ============================================================================
+        // Changes the currently selected date, cycling through available dates.
+        // Called when user clicks prev/next buttons.
+        //
+        // Input: direction = -1 (previous) or +1 (next)
+        // Effect: Updates activeEventDate, UI label, and rebuilds event markers
+        
+        function changeActiveDate(direction) {
+          // Safety check: need at least one available date
+          if (!availableEventDates.length) return;
+          
+          // Find the index of the currently active date
+          let idx = availableEventDates.indexOf(activeEventDate);
+          
+          // If date not found (shouldn't happen), default to first date
+          if (idx === -1) idx = 0;
+          
+          // Calculate new index with wrapping (circular navigation)
+          // direction = -1 (prev) or +1 (next)
+          // Adding availableEventDates.length ensures positive result before modulo
+          idx = (idx + direction + availableEventDates.length) % availableEventDates.length;
+          // Example: If at index 0 and direction = -1:
+          //   (0 + (-1) + 5) % 5 = 4 % 5 = 4 (wraps to last date)
+          
+          // Update the active date
+          activeEventDate = availableEventDates[idx];
+          
+          // Update the UI label to show the new date
+          updateEventDateLabel();
+          
+          // Rebuild event markers for the new date
+          // This disposes old markers and creates new ones for the selected date
+          rebuildEventMarkersForActiveDate();
+        }
+
+        if (eventDatePrev) {
+          eventDatePrev.addEventListener("click", () => {
+          blockNextSelect = true;
+            changeActiveDate(-1);
+        });
+        }
+
+        if (eventDateNext) {
+          eventDateNext.addEventListener("click", () => {
+          blockNextSelect = true;
+            changeActiveDate(1);
+          });
+        }
+
+        // (Road rotation controls removed – geometry/roads are now controlled purely by placement and data)
+      })(); // End of init function
+    </script>
+  </body>
+</html>

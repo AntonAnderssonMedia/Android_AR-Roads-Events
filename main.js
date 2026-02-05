@@ -515,8 +515,8 @@ async function supportsAR() {
 
     while (eventsGroup.children.length) eventsGroup.remove(eventsGroup.children[0]);
 
-    const shadowRadius = 0.0015;
-    const shadowSegments = 8;
+    const shadowRadius = 0.0015; 
+    const shadowSegments = 8; // shadowCylinder is 8 for low polygon count.
 
     for (const marker of eventMarkers) {
         const height = calculateHeightFromTimestamp(eventMarkers, marker);

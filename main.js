@@ -408,6 +408,11 @@ async function supportsAR() {
     function rebuildEventMarkersForActiveDate() {
     while (eventMarkers.length) {
         const m = eventMarkers.pop();
+        if (m.userData.shadowCylinder) {
+            const c = m.userData.shadowCylinder;
+            if (c.geometry) c.geometry.dispose();
+            if (c.material) c.material.dispose();
+        }
         if (m.geometry) m.geometry.dispose();
         if (m.material) m.material.dispose();
     }
@@ -486,10 +491,34 @@ async function supportsAR() {
 
     while (eventsGroup.children.length) eventsGroup.remove(eventsGroup.children[0]);
 
+    const shadowRadius = 0.0015; 
+    const shadowSegments = 8; // shadowCylinder is 8 for low polygon count.
+
     for (const marker of eventMarkers) {
         const height = calculateHeightFromTimestamp(eventMarkers, marker);
         marker.position.set(marker.userData.localX, marker.userData.localZ, height);
         marker.quaternion.identity();
+
+        if (!marker.userData.shadowCylinder) {
+            const color = marker.material.color.getHex();
+            const cylGeom = new THREE.CylinderGeometry(shadowRadius, shadowRadius, height, shadowSegments);
+            const cylMat = new THREE.MeshStandardMaterial({
+                color,
+                metalness: 0,
+                roughness: 0.4,
+                emissive: color,
+                emissiveIntensity: 0.2
+            });
+            const cylinder = new THREE.Mesh(cylGeom, cylMat);
+            cylinder.rotation.x = -Math.PI / 2;
+            cylinder.position.z = -height / 2;
+            marker.add(cylinder);
+            marker.userData.shadowCylinder = cylinder;
+        } else {
+            const cylinder = marker.userData.shadowCylinder;
+            cylinder.position.z = -height / 2;
+        }
+
         eventsGroup.add(marker);
     }
     }

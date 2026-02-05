@@ -58,6 +58,16 @@ async function supportsAR() {
     };
 
     const overlayRotationY = Math.PI / 2;
+    const MAP_HALF = 0.2; // half of 0.4m plane, for contour lines
+
+    // "extract" "HH:MM" from "YYYY/MM/DD HH:MM:SS.sss" (for labels)
+    function formatEventTime(dateTimeEvent) {
+    if (!dateTimeEvent) return "";
+    const part = dateTimeEvent.split(" ")[1];
+    if (!part) return "";
+    const [hms] = part.split(".");
+    return hms ? hms.substring(0, 5) : part.substring(0, 5); // "HH:MM"
+    }
 
     // Setup the three.js renderer, scene, and camera
     function setupThree() {
@@ -408,6 +418,11 @@ async function supportsAR() {
     function rebuildEventMarkersForActiveDate() {
     while (eventMarkers.length) {
         const m = eventMarkers.pop();
+        if (m.userData.shadowCylinder) {
+            const c = m.userData.shadowCylinder;
+            if (c.geometry) c.geometry.dispose();
+            if (c.material) c.material.dispose();
+        }
         if (m.geometry) m.geometry.dispose();
         if (m.material) m.material.dispose();
     }
@@ -484,14 +499,112 @@ async function supportsAR() {
     const eventsGroup = placedPlane.userData.eventsGroup;
     if (!eventsGroup) return;
 
+    // Dispose and remove previous height-lines group
+    const prevTimeLines = placedPlane.userData.timeLinesGroup;
+    if (prevTimeLines) {
+        prevTimeLines.traverse((o) => {
+            if (o.geometry) o.geometry.dispose();
+            if (o.material) {
+                if (o.material.map && o.material.map.dispose) o.material.map.dispose();
+                o.material.dispose();
+            }
+        });
+        eventsGroup.remove(prevTimeLines);
+        placedPlane.userData.timeLinesGroup = null;
+    }
+
     while (eventsGroup.children.length) eventsGroup.remove(eventsGroup.children[0]);
+
+    const shadowRadius = 0.0015;
+    const shadowSegments = 8;
 
     for (const marker of eventMarkers) {
         const height = calculateHeightFromTimestamp(eventMarkers, marker);
         marker.position.set(marker.userData.localX, marker.userData.localZ, height);
         marker.quaternion.identity();
+
+        if (!marker.userData.shadowCylinder) {
+            const color = marker.material.color.getHex();
+            const cylGeom = new THREE.CylinderGeometry(shadowRadius, shadowRadius, height, shadowSegments);
+            const cylMat = new THREE.MeshStandardMaterial({
+                color,
+                metalness: 0,
+                roughness: 0.4,
+                emissive: color,
+                emissiveIntensity: 0.2
+            });
+            const cylinder = new THREE.Mesh(cylGeom, cylMat);
+            cylinder.rotation.x = -Math.PI / 2;
+            cylinder.position.z = -height / 2;
+            marker.add(cylinder);
+            marker.userData.shadowCylinder = cylinder;
+        } else {
+            const cylinder = marker.userData.shadowCylinder;
+            cylinder.position.z = -height / 2;
+        }
+
         eventsGroup.add(marker);
     }
+
+    // Contour lines around the map at each event height, with time labels
+    const timeLines = new Map();
+    for (const marker of eventMarkers) {
+        const h = calculateHeightFromTimestamp(eventMarkers, marker);
+        if (!timeLines.has(h)) timeLines.set(h, formatEventTime(marker.userData.dateTimeEvent)); // only add unique time labels
+    }
+    const heights = Array.from(timeLines.keys()).sort((a, b) => a - b); // ordered list (ascending) of unique heights
+
+    const timeLinesGroup = new THREE.Group();
+    timeLinesGroup.name = "timeLinesGroup";
+    const contourRibbonWidth = 0.002; // thick line,
+    const contourMaterial = new THREE.MeshBasicMaterial({ color: 0x444444, side: THREE.DoubleSide });
+
+    const nHeights = heights.length; // number of unique heights, usage: spread the time labels for readability
+    for (let i = 0; i < nHeights; i++) {
+        const h = heights[i];
+        const points = [
+            new THREE.Vector3(-MAP_HALF, -MAP_HALF, h),
+            new THREE.Vector3(MAP_HALF, -MAP_HALF, h),
+            new THREE.Vector3(MAP_HALF, MAP_HALF, h),
+            new THREE.Vector3(-MAP_HALF, MAP_HALF, h),
+            new THREE.Vector3(-MAP_HALF, -MAP_HALF, h)
+        ];
+        const ribbonGeom = createRibbonGeometry(points, contourRibbonWidth);
+        if (ribbonGeom) {
+            const ribbon = new THREE.Mesh(ribbonGeom, contourMaterial);
+            timeLinesGroup.add(ribbon);
+        }
+
+        const timeStr = timeLines.get(h) || "";
+        if (!timeStr) continue;
+        // create a canvas for the time label
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        const w = 128;
+        canvas.width = w;
+        canvas.height = 48;
+        ctx.fillStyle = "rgba(0,0,0,0.7)";
+        ctx.fillRect(0, 0, w, 48);
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 24px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(timeStr, w / 2, 30);
+        // create a texture from the canvas
+        const tex = new THREE.CanvasTexture(canvas);
+        // force texture update
+        tex.needsUpdate = true;
+        const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+        const sprite = new THREE.Sprite(spriteMat);
+        // Back edge of map (y = MAP_HALF) so labels don’t obstruct the view; spread horizontally
+        const labelX = nHeights <= 1 ? 0 : -MAP_HALF + (i / (nHeights - 1)) * (2 * MAP_HALF);
+        sprite.position.set(labelX, MAP_HALF, h);
+        sprite.scale.set(0.04, 0.02, 1);
+        timeLinesGroup.add(sprite);
+    }
+    // store a reference to the time lines group in placedPlane.userData
+    placedPlane.userData.timeLinesGroup = timeLinesGroup;
+    // make timeLinesGroup visible in the scene graph + moves with the plane
+    eventsGroup.add(timeLinesGroup);
     }
 
     function removeEventsFromPlane() {

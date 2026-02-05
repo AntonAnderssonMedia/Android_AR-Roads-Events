@@ -327,16 +327,17 @@ async function supportsAR() {
     renderer.render(scene, camera);
     }
 
-    // Map levelcomfort (1–5) to color: 1 = red (low), 5 = green (high). Five discrete steps.
+    // Five distinct colors for levelcomfort 1–5: red, orange, yellow, blue, green.
     function getComfortColor(level) {
-        level = Math.max(1, Math.min(5, Math.floor(level)));
-        const t = (level - 1) / 4; // 0, 0.25, 0.5, 0.75, 1 for levels 1–5
-        const red = { r: 0xef, g: 0x44, b: 0x44 };   // #ef4444 – level 1 (low comfort)
-        const green = { r: 0x22, g: 0xc5, b: 0x5e }; // #22c55e – level 5 (high comfort)
-        const r = Math.round(red.r + (green.r - red.r) * t);
-        const g = Math.round(red.g + (green.g - red.g) * t);
-        const b = Math.round(red.b + (green.b - red.b) * t);
-        return (r << 16) | (g << 8) | b;
+        const i = Math.max(0, Math.min(4, Math.floor(level) - 1));
+        const colors = [
+            0xef4444, // 1 = red
+            0xf97316, // 2 = orange
+            0xeab308, // 3 = yellow
+            0x3b82f6, // 4 = blue
+            0x22c55e  // 5 = green
+        ];
+        return colors[i];
     }
 
     // Project WGS84 lat/lon -> plane local X/Z (meters), plane is 0.4m wide and centered at origin

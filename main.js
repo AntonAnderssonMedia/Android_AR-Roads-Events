@@ -327,19 +327,16 @@ async function supportsAR() {
     renderer.render(scene, camera);
     }
 
-    // Get the comfort color
+    // Map levelcomfort (1–5) to color: 1 = red (low), 5 = green (high). Five discrete steps.
     function getComfortColor(level) {
-    // Clamp the level between 1 and 5
-    level = Math.max(1, Math.min(5, level));
-    const t = (level - 1) / 4;
-    // Define the blue and red colors
-    // Calculate the color based on the level
-    const blue = { r: 0x25, g: 0x63, b: 0xeb };
-    const red = { r: 0xef, g: 0x44, b: 0x44 };
-    const r = Math.round(blue.r + (red.r - blue.r) * t);
-    const g = Math.round(blue.g + (red.g - blue.g) * t);
-    const b = Math.round(blue.b + (red.b - blue.b) * t);
-    return (r << 16) | (g << 8) | b;
+        level = Math.max(1, Math.min(5, Math.floor(level)));
+        const t = (level - 1) / 4; // 0, 0.25, 0.5, 0.75, 1 for levels 1–5
+        const red = { r: 0xef, g: 0x44, b: 0x44 };   // #ef4444 – level 1 (low comfort)
+        const green = { r: 0x22, g: 0xc5, b: 0x5e }; // #22c55e – level 5 (high comfort)
+        const r = Math.round(red.r + (green.r - red.r) * t);
+        const g = Math.round(red.g + (green.g - red.g) * t);
+        const b = Math.round(red.b + (green.b - red.b) * t);
+        return (r << 16) | (g << 8) | b;
     }
 
     // Project WGS84 lat/lon -> plane local X/Z (meters), plane is 0.4m wide and centered at origin

@@ -334,6 +334,54 @@ async function supportsAR() {
         }
     }
 
+    // Move time-label sprites to the map edge furthest from the camera (full walk-around support)
+    if (placedPlane && placedPlane.userData?.timeLinesGroup && camera) {
+        const camWorld = new THREE.Vector3();
+        camera.getWorldPosition(camWorld);
+
+        // Camera position in plane-local space (X/Y edges, Z = height)
+        const inv = new THREE.Matrix4().copy(placedPlane.matrixWorld).invert();
+        const camLocal = camWorld.clone().applyMatrix4(inv);
+
+        const timeLinesGroup = placedPlane.userData.timeLinesGroup;
+
+        // Count sprites first so we can spread them evenly along the chosen edge
+        let spriteCount = 0;
+        for (const child of timeLinesGroup.children) {
+        if (child.isSprite) spriteCount++;
+        }
+
+        if (spriteCount > 0) {
+        // Decide which edge is \"back\": horizontal (±Y) or vertical (±X)
+        const useVerticalEdge = Math.abs(camLocal.x) >= Math.abs(camLocal.y);
+
+        let spriteIndex = 0;
+        for (const child of timeLinesGroup.children) {
+            if (!child.isSprite) continue;
+
+            const t = spriteCount === 1 ? 0.5 : spriteIndex / (spriteCount - 1);
+            let x = 0;
+            let y = 0;
+
+            if (useVerticalEdge) {
+            // Camera is more on +X / -X side → place labels on opposite X edge, spread along Y
+            const edgeX = camLocal.x >= 0 ? -MAP_HALF : MAP_HALF;
+            x = edgeX;
+            y = -MAP_HALF + t * (2 * MAP_HALF);
+            } else {
+            // Camera is more on +Y / -Y side → place labels on opposite Y edge, spread along X
+            const edgeY = camLocal.y >= 0 ? -MAP_HALF : MAP_HALF;
+            y = edgeY;
+            x = -MAP_HALF + t * (2 * MAP_HALF);
+            }
+
+            child.position.x = x;
+            child.position.y = y;
+            spriteIndex++;
+        }
+        }
+    }
+
     renderer.render(scene, camera);
     }
 
